@@ -7,7 +7,7 @@
    VERSION 加 1（v3 -> v4）强制换新。
    --------------------------------------------------------------- */
 
-const VERSION = 'v3';
+const VERSION = 'v4';
 const CACHE = 'gym-' + VERSION;
 
 /* 第一次安装时预先存下来的文件 */

@@ -211,6 +211,21 @@
   .cmeta{font-size:12.5px;color:var(--muted);margin-bottom:12px;line-height:1.6}
   .sheet.big{max-height:88vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
 
+  /* ——— 每日感想 ——— */
+  .diary{background:#fff;border-radius:15px;padding:14px;margin-bottom:12px;cursor:pointer;
+    box-shadow:0 1px 3px rgba(20,30,60,.06);border-left:3px solid #e3e8f2;transition:background .15s}
+  .diary:active{background:#fafbfd}
+  .diary.has{border-left-color:var(--accent)}
+  .diary .dtext{font-size:14.5px;color:#3c4658;line-height:1.75;white-space:pre-wrap;
+    word-break:break-word}
+  .diary .dedit{font-size:11.5px;color:var(--muted);margin-top:9px}
+  .diary .dempty{font-size:13.5px;color:#a8b0bf;padding:3px 0}
+
+  /* ——— 记录页里的日记 ——— */
+  .dentry{font-size:13.5px;color:#4a5568;background:#f9fafc;border-radius:9px;
+    padding:9px 11px;margin-top:9px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+  .dentry::before{content:'📝 ';}
+
   .toast{position:fixed;left:50%;bottom:34px;transform:translate(-50%,20px);background:#1f2430;
     color:#fff;font-size:13.5px;padding:10px 18px;border-radius:99px;opacity:0;
     transition:all .22s;pointer-events:none;z-index:99;white-space:nowrap;max-width:92vw;overflow:hidden}
@@ -283,6 +298,7 @@ const WEEK_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
 const DAY_NAME   = { mon:'周一', tue:'周二', wed:'周三', thu:'周四', fri:'周五', sat:'周六', sun:'周日' };
 
 const K_PLAN = 'gym.plan.v2', K_LOGS = 'gym.logs.v2', K_SET = 'gym.settings.v1';
+const K_DIARY = 'gym.diary.v1';
 
 /* ---------- 存储 ---------- */
 function load(key, fallback){
@@ -329,6 +345,26 @@ if (!logs){
   save(K_LOGS, logs);
 }
 let settings = Object.assign({ vib:true, level:1 }, load(K_SET, {}));
+
+/* 日记：单独存一份，key 是日期 'YYYY-MM-DD'，值是文字。
+   这样休息日也能写感想，不必依赖当天有没有打卡记录。 */
+let diary = load(K_DIARY, {});
+/* 兼容：万一以后混进非字符串或空值，统一清洗一遍 */
+(function cleanDiary(){
+  let changed = false;
+  Object.keys(diary).forEach(k => {
+    if (typeof diary[k] !== 'string'){ delete diary[k]; changed = true; }
+    else if (!diary[k].trim()){ delete diary[k]; changed = true; }
+  });
+  if (changed) save(K_DIARY, diary);
+})();
+function getDiary(d){ return diary[d] || ''; }
+function setDiary(d, txt){
+  const v = String(txt == null ? '' : txt).trim();
+  if (v) diary[d] = v; else delete diary[d];
+  return save(K_DIARY, diary);
+}
+function hasDiary(d){ return !!diary[d]; }
 
 /* 存储自检：file:// 下少数安卓浏览器会禁用 localStorage，
    那样数据存不住。宁可开机就报警，也不要练完发现没记上。 */
@@ -621,6 +657,16 @@ function htmlCheckin(){
     });
   }
 
+  /* ——— 每日感想（任何一天都能写，休息日也行） ——— */
+  const dText = getDiary(checkinDate);
+  h += '<div class="section-title">每日感想</div>'
+    +  '<div class="diary' + (dText ? ' has' : '') + '" data-diary="' + checkinDate + '">'
+    +  (dText
+        ? '<div class="dtext">' + esc(dText) + '</div>'
+          + '<div class="dedit">点这里修改 ✎</div>'
+        : '<div class="dempty">今天感觉怎么样？点这里写几句 →</div>')
+    +  '</div>';
+
   /* ——— 底部操作 ——— */
   if (log && items.length && !isFuture){
     h += '<div style="display:flex;gap:8px;padding:0 2px">'
@@ -761,19 +807,26 @@ function htmlProgress(){
 
 /* ---------- 记录页 ---------- */
 function htmlHistory(){
-  const dates = Object.keys(logs).sort().reverse();
+  /* 把「有打卡」和「有感想」的日期合并，只写了感想的日期也要出现 */
+  const logDates   = Object.keys(logs);
+  const diaryDates = Object.keys(diary);
+  const dateSet = {};
+  logDates.forEach(d => { dateSet[d] = 1; });
+  diaryDates.forEach(d => { dateSet[d] = 1; });
+  const dates = Object.keys(dateSet).sort().reverse();
 
   let trainDays = 0, restDays = 0, doneAll = 0, allAll = 0;
-  dates.forEach(dt => {
-    const L = logs[dt], its = L.items || [];
+  logDates.forEach(dt => {
+    const L = logs[dt], its = (L && L.items) || [];
     if (L.rest || !its.length) restDays++; else trainDays++;
     its.forEach(i => { allAll++; if (i.done) doneAll++; });
   });
+  const diaryCount = diaryDates.length;
 
   let h = '';
   if (!dates.length){
     h = '<div class="card"><div class="empty"><div class="big">还没有记录</div>'
-      + '去「打卡」页点一个动作试试</div></div>';
+      + '去「打卡」页点一个动作，或者写两句今天的感想</div></div>';
   } else {
     /* 连续天数：今天没记就从昨天往回数 */
     let streak = 0; const d = new Date();
@@ -781,9 +834,10 @@ function htmlHistory(){
     while (logs[ymd(d)]) { streak++; d.setDate(d.getDate() - 1); }
 
     h += '<div class="statrow">'
-      +  '<div class="stat"><b>' + trainDays + '</b><span>训练天数</span></div>'
-      +  '<div class="stat"><b>' + restDays  + '</b><span>休息天数</span></div>'
-      +  '<div class="stat"><b>' + streak    + '</b><span>连续天数</span></div>'
+      +  '<div class="stat"><b>' + trainDays  + '</b><span>训练天数</span></div>'
+      +  '<div class="stat"><b>' + restDays   + '</b><span>休息天数</span></div>'
+      +  '<div class="stat"><b>' + diaryCount + '</b><span>感想篇数</span></div>'
+      +  '<div class="stat"><b>' + streak     + '</b><span>连续天数</span></div>'
       +  '</div>';
     if (allAll){
       const pct = Math.round(doneAll / allAll * 100);
@@ -793,21 +847,35 @@ function htmlHistory(){
     }
 
     dates.slice(0, 60).forEach(dt => {
-      const L = logs[dt], items = L.items || [];
+      const L = logs[dt];
+      const items = (L && L.items) || [];
       const done = items.filter(i => i.done).length;
-      if (L.rest || !items.length){
-        h += '<div class="card"><div class="hist"><div class="hh">'
-          +  '<b>' + prettyDate(dt) + '</b><span>' + daysAgoLabel(dt) + '</span></div>'
-          +  '<div class="chips"><span class="chip rest">🛌 休息日</span></div></div></div>';
-      } else {
-        h += '<div class="card"><div class="hist">'
-          +  '<div class="hh"><b>' + prettyDate(dt) + '</b><span>' + done + '/' + items.length
-          +  (done === items.length ? ' ✅' : '') + '</span></div>'
-          +  '<div class="chips">'
+      const dtext = getDiary(dt);
+
+      /* 头部右侧：有打卡就显示完成度，只有感想就说明一下 */
+      let right = daysAgoLabel(dt);
+      if (L && items.length) right = done + '/' + items.length + (done === items.length ? ' ✅' : '');
+      else if (L && (L.rest || !items.length)) right = daysAgoLabel(dt);
+
+      h += '<div class="card"><div class="hist">'
+        +  '<div class="hh"><b>' + prettyDate(dt) + '</b><span>' + right + '</span></div>';
+
+      if (L && (L.rest || !items.length)){
+        h += '<div class="chips"><span class="chip rest">🛌 休息日</span></div>';
+      } else if (items.length){
+        h += '<div class="chips">'
           +  items.map(i => '<span class="chip' + (i.done ? ' on' : '') + '">' + esc(i.name)
               + (i.weight ? ' · ' + esc(i.weight) + 'kg' : '') + '</span>').join('')
-          +  '</div></div></div>';
+          +  '</div>';
+      } else {
+        /* 这天没打卡，只写了感想 */
+        h += '<div class="chips"><span class="chip">没打卡</span></div>';
       }
+
+      if (dtext){
+        h += '<div class="dentry" data-diaryhist="' + dt + '">' + esc(dtext) + '</div>';
+      }
+      h += '</div></div>';
     });
   }
 
@@ -836,7 +904,9 @@ function htmlHistory(){
     +  '<small>' + (STORAGE_OK ? '正常，记录能存住' : '不可用！关掉页面记录会丢，请换 Chrome') + '</small></div>'
     +  '<span style="font-size:18px">' + (STORAGE_OK ? '✅' : '⚠️') + '</span></div>'
     +  '<div class="setrow"><div class="lb">当前记录天数'
-    +  '<small>训练 + 休息</small></div><b style="font-size:16px">' + dates.length + '</b></div>'
+    +  '<small>训练 + 休息</small></div><b style="font-size:16px">' + logDates.length + '</b></div>'
+    +  '<div class="setrow"><div class="lb">每日感想'
+    +  '<small>写过的天数</small></div><b style="font-size:16px">' + diaryCount + '</b></div>'
     +  '</div>'
     +  '<div style="display:flex;gap:8px;flex-wrap:wrap">'
     +  '<button class="btn ghost" data-export="1">导出备份</button>'
@@ -846,7 +916,7 @@ function htmlHistory(){
     +  '<input type="file" id="fileIn" accept=".json,application/json" style="display:none">'
     +  '</div>'
     +  '<div class="hint">数据只存在这台手机里，清理浏览器数据、卸载浏览器、换手机都会丢，'
-    +  '建议定期「导出备份」（存成一个 JSON 文件）。<br>'
+    +  '建议定期「导出备份」（存成一个 JSON 文件，里面包含计划、记录和所有感想）。<br>'
     +  '「补记漏掉的休息日」会把有记录的第一天到今天之间、没有记录且当天无安排的日子标成休息日，'
     +  '让连续天数更准确；如果你在那些天其实练过，就别点它。</div>';
   return h;
@@ -854,12 +924,16 @@ function htmlHistory(){
 
 /* ---------- 底部编辑面板 ---------- */
 let sheetSave = null;
-function openSheet(title, sub, value, placeholder, onSave){
+/* opts.big = true 时编辑框更高，用于写日记这类长文字 */
+function openSheet(title, sub, value, placeholder, onSave, opts){
   $('#shTitle').textContent = title;
   $('#shSub').textContent = sub || '';
   const ta = $('#shText');
   ta.value = value || '';
   ta.placeholder = placeholder || '';
+  const big = !!(opts && opts.big);
+  ta.style.minHeight = big ? '190px' : '104px';
+  $('#sheet').classList.toggle('big', big);
   sheetSave = onSave;
   $('#mask').classList.add('on');
   $('#sheet').classList.add('on');
@@ -949,6 +1023,23 @@ function bind(){
     regenLog(checkinDate); toast('已重新生成'); render();
   };
 
+  /* 每日感想 */
+  document.querySelectorAll('[data-diary]').forEach(el => {
+    el.onclick = () => {
+      const d = el.dataset.diary;
+      const wasEmpty = !hasDiary(d);
+      openSheet('每日感想', prettyDate(d) + ' · 写点训练感受、状态、想法都行',
+        getDiary(d), '例如：今天状态不错，卧推第一次上 60kg，最后一组有点勉强，明天注意肩部放松',
+        v => {
+          setDiary(d, v);
+          render();
+          if (v && wasEmpty) toast('已保存今天的感想');
+          else if (v) toast('已更新');
+          else toast('已清空');
+        }, { big:true });
+    };
+  });
+
   /* 进度页：展开某动作详情 */
   document.querySelectorAll('[data-popen]').forEach(el => {
     el.onclick = () => { progressEx = el.dataset.popen; bump('nav'); render(); };
@@ -1029,10 +1120,20 @@ function bind(){
     };
   });
 
+  /* 记录页：点日记可以就地修改 */
+  document.querySelectorAll('[data-diaryhist]').forEach(el => {
+    el.onclick = () => {
+      const d = el.dataset.diaryhist;
+      openSheet('每日感想', prettyDate(d), getDiary(d),
+        '写点训练感受、状态、想法…',
+        v => { setDiary(d, v); render(); toast(v ? '已保存' : '已清空'); }, { big:true });
+    };
+  });
+
   /* 导出 */
   const ex = document.querySelector('[data-export]');
   if (ex) ex.onclick = () => {
-    const data = { app:'gym-checkin', v:2, exportedAt:new Date().toISOString(), plan, logs, settings };
+    const data = { app:'gym-checkin', v:3, exportedAt:new Date().toISOString(), plan, logs, settings, diary };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -1052,10 +1153,12 @@ function bind(){
       try {
         const d = JSON.parse(r.result);
         if (!d.plan || !d.logs) throw 0;
-        if (!confirm('导入会覆盖当前计划和记录，继续？')) return;
+        if (!confirm('导入会覆盖当前计划、记录和感想，继续？')) return;
         plan = migratePlan(d.plan); logs = migrateLogs(d.logs);
+        /* 老备份里没有 diary 字段，这时保留当前的感想不动 */
+        if (d.diary && typeof d.diary === 'object') diary = d.diary;
         if (d.settings) { settings = Object.assign(settings, d.settings); save(K_SET, settings); }
-        save(K_PLAN, plan); save(K_LOGS, logs);
+        save(K_PLAN, plan); save(K_LOGS, logs); save(K_DIARY, diary);
         toast('导入成功'); render();
       } catch(e){ toast('这个文件读不出来'); }
       fi.value = '';
@@ -1082,11 +1185,22 @@ function bind(){
     save(K_LOGS, logs); toast('已补 ' + miss.length + ' 天'); render();
   };
 
-  /* 清空 */
+  /* 清空：记录和感想分开问，避免误删写下的文字 */
   const rs = document.querySelector('[data-reset]');
   if (rs) rs.onclick = () => {
     if (!confirm('清空所有打卡记录？（周计划会保留）')) return;
-    logs = {}; save(K_LOGS, logs); toast('已清空'); render();
+    logs = {}; save(K_LOGS, logs);
+    /* 打卡记录清掉了，但感想是手写内容，单独再确认一次 */
+    if (Object.keys(diary).length){
+      if (confirm('你还有 ' + Object.keys(diary).length + ' 篇每日感想。\n要连感想一起清空吗？\n\n点「取消」= 保留感想（推荐）')) {
+        diary = {}; save(K_DIARY, diary); toast('记录和感想都已清空');
+      } else {
+        toast('已清空打卡记录，感想保留');
+      }
+    } else {
+      toast('已清空');
+    }
+    render();
   };
 }
 
