@@ -78,6 +78,17 @@
   .ex.done .txt .t{color:#d6dae4}
   .ex.pop .tick{transform:scale(1.18)}
 
+  /* 拖拽：只用 transform 做动画，不触发重排 */
+  .ex{transition:background .15s, transform .18s cubic-bezier(.2,.8,.3,1)}
+  .ex.dragging{transition:none;position:relative;z-index:20;
+    box-shadow:0 10px 26px rgba(20,30,60,.20);cursor:grabbing}
+  .ex.settling{transition:transform .16s cubic-bezier(.2,.8,.3,1)}
+  .exdel{width:30px;height:30px;flex:0 0 30px;border:0;background:transparent;color:#ccd2de;
+    font-size:19px;line-height:1;border-radius:8px;padding:0}
+  .exdel:active{background:#fff0f0;color:var(--danger)}
+  .tmpbadge{display:inline-block;font-size:10px;font-weight:600;color:#8a6d00;background:#fff4d6;
+    border-radius:6px;padding:1px 5px;margin-left:5px;vertical-align:2px;text-decoration:none}
+
   /* 重量 + 备注 工具行 */
   .ex-tools{display:flex;align-items:center;gap:8px;padding:0 14px 13px 54px;flex-wrap:wrap}
   .wfield{display:flex;align-items:center;background:var(--soft);border:1px solid var(--line);
@@ -622,6 +633,12 @@ let planDay = dayKeyOf(new Date());
 
 /* ---------- 渲染 ---------- */
 function render(){
+  /* 保险：如果重绘时还处于拖拽中，先把页面滚动锁解开，
+     否则 overflow:hidden 会一直留着，整个页面滑不动。 */
+  if (typeof pressState !== 'undefined' && pressState){
+    if (pressState.active && typeof lockScroll === 'function') lockScroll(false);
+    pressState = null;
+  }
   $('#subtitle').textContent = '今天是 ' + prettyDate(todayStr());
   document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
   const box = $('#view');
@@ -690,12 +707,14 @@ function htmlCheckin(){
     /* ——— 动作列表 ——— */
     items.forEach((it, i) => {
       const last = lastWeightFor(it.name, checkinDate);
-      h += '<div class="ex' + (it.done ? ' done' : '') + '" data-ex="' + i + '">'
+      h += '<div class="ex' + (it.done ? ' done' : '') + '" data-ex="' + i + '" data-idx="' + i + '">'
         +  '<div class="ex-main" data-toggle="' + i + '">'
         +    '<div class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" '
         +    'stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 6.5"/></svg></div>'
-        +    '<div class="txt"><div class="n">' + esc(it.name) + '</div>'
+        +    '<div class="txt"><div class="n">' + esc(it.name)
+        +      (it.temp ? '<span class="tmpbadge">临时</span>' : '') + '</div>'
         +    (it.target ? '<div class="t">' + esc(it.target) + '</div>' : '') + '</div>'
+        +    '<button class="exdel" data-exdel="' + i + '" aria-label="移除">×</button>'
         +  '</div>'
         +  '<div class="ex-tools">'
         +    '<label class="wfield"><input data-w="' + i + '" type="text" inputmode="decimal" '
@@ -708,6 +727,16 @@ function htmlCheckin(){
         +  (it.note ? '<div class="notetext" data-note="' + i + '">' + esc(it.note) + '</div>' : '')
         +  '</div>';
     });
+  }
+
+  /* ——— 临时动作：只加到这一天，不改周计划 ——— */
+  if (log && !isFuture){
+    h += '<div class="card" style="padding:0;margin-bottom:12px">'
+      +  '<div class="addform">'
+      +    '<input id="tmpName" placeholder="临时动作，如 跑步机 20 分钟" autocomplete="off">'
+      +    '<input id="tmpTgt" class="tgt" placeholder="组数×次数" autocomplete="off">'
+      +    '<button class="btn" data-tmpadd="1" style="flex:0 0 100%">＋ 临时加一个动作（只影响这一天）</button>'
+      +  '</div></div>';
   }
 
   /* ——— 每日感想（任何一天都能写，休息日也行） ——— */
@@ -1044,6 +1073,180 @@ function closeNameSheet(){
 }
 function closeAllSheets(){ closeSheet(); closeNameSheet(); }
 
+/* ---------- 按住拖动排序 ----------
+   手指按住卡片约 0.2 秒进入拖拽，之后上下拖动。
+   关键：整个过程只改 transform（交给 GPU 合成），不插入 DOM、不量元素，
+   所以不会触发浏览器重排——这是不卡的根本原因。
+   换位只改变"其它卡片让位"的 translateY，带 CSS 过渡所以是平滑动画。 */
+
+let dragSuppressClick = false;
+let pressState = null;
+
+function shiftOthers(s){
+  const step = s.h + s.gap;
+  s.rects.forEach((r, i) => {
+    if (i === s.from) return;
+    let d = 0;
+    if (s.from < s.to && i > s.from && i <= s.to) d = -step;
+    else if (s.from > s.to && i >= s.to && i < s.from) d = step;
+    r.el.style.transform = d ? 'translateY(' + d + 'px)' : '';
+  });
+}
+
+function dragFrame(s){
+  if (!pressState || pressState !== s || !s.active) return;
+  const dy = s.lastY - s.startY;
+  s.el.style.transform = 'translateY(' + dy + 'px) scale(1.02)';
+
+  /* 用被拖卡片的中心线判断该落在第几格 */
+  const center = s.rects[s.from].top + dy + s.h / 2;
+  let to = s.from;
+  for (let i = s.from - 1; i >= 0; i--){
+    if (center < s.rects[i].top + s.rects[i].h / 2) to = i; else break;
+  }
+  for (let i = s.from + 1; i < s.rects.length; i++){
+    if (center > s.rects[i].top + s.rects[i].h / 2) to = i; else break;
+  }
+  if (to !== s.to){ s.to = to; shiftOthers(s); }
+}
+
+function lockScroll(on){
+  document.documentElement.style.overflow = on ? 'hidden' : '';
+  document.body.style.overflow = on ? 'hidden' : '';
+}
+
+function bindPressDrag(itemSel, commit){
+  const collect = () => Array.prototype.slice.call(document.querySelectorAll(itemSel));
+  const items = collect();
+
+  /* 拖拽期间禁用页面滚动（手机上唯一可靠的做法，必须是非 passive） */
+  if (!bindPressDrag._touchBound){
+    bindPressDrag._touchBound = true;
+    document.addEventListener('touchmove', e => {
+      if (pressState && pressState.active) e.preventDefault();
+    }, { passive: false });
+  }
+
+  items.forEach(el => {
+    el.addEventListener('pointerdown', ev => {
+      if (ev.button != null && ev.button !== 0) return;
+      if (pressState) return;
+      /* 按钮、输入框、备注文字上按下时不进入拖拽 */
+      if (ev.target && ev.target.closest && ev.target.closest('button, input, label, .notetext')) return;
+
+      const s = {
+        el: el, pid: ev.pointerId, startY: ev.clientY, startX: ev.clientX,
+        lastY: ev.clientY, active: false, from: 0, to: 0,
+        h: 0, gap: 10, rects: [], timer: 0, raf: 0
+      };
+      pressState = s;
+
+      s.timer = setTimeout(() => {
+        if (pressState !== s) return;
+        const arr = collect();
+        const from = arr.indexOf(el);
+        if (from < 0){ pressState = null; return; }
+
+        /* 只在进入拖拽的这一瞬间量一次位置，之后全程复用 */
+        s.rects = arr.map(x => {
+          const r = x.getBoundingClientRect();
+          return { top: r.top, h: r.height, el: x };
+        });
+        s.from = from;
+        s.to = from;
+        s.h = s.rects[from].h;
+        s.gap = s.rects.length > 1
+          ? Math.max(0, s.rects[1].top - (s.rects[0].top + s.rects[0].h))
+          : 10;
+        s.active = true;
+        el.classList.add('dragging');
+        lockScroll(true);
+        try { el.setPointerCapture(s.pid); } catch(e){}
+        bump('add');
+      }, 200);
+    });
+
+    el.addEventListener('pointermove', ev => {
+      const s = pressState;
+      if (!s || s.el !== el) return;
+
+      if (!s.active){
+        /* 还没进入拖拽：手指明显移动了就当成滑动页面，取消长按 */
+        if (Math.abs(ev.clientY - s.startY) > 10 || Math.abs(ev.clientX - s.startX) > 10){
+          clearTimeout(s.timer);
+          pressState = null;
+        }
+        return;
+      }
+      s.lastY = ev.clientY;
+      if (!s.raf){
+        s.raf = requestAnimationFrame(() => { s.raf = 0; dragFrame(s); });
+      }
+    });
+
+    el.addEventListener('pointerup', () => {
+      const s = pressState;
+      if (!s || s.el !== el) return;
+      clearTimeout(s.timer);
+      if (!s.active){ pressState = null; return; }
+
+      const from = s.from, to = s.to, n = s.rects.length;
+      el.classList.remove('dragging');
+      el.style.transform = '';
+      s.rects.forEach(r => { r.el.style.transform = ''; });
+      lockScroll(false);
+      pressState = null;
+
+      /* 拖过一次就别再触发"打勾" */
+      dragSuppressClick = true;
+      setTimeout(() => { dragSuppressClick = false; }, 400);
+
+      if (from === to) return;
+      bump('check');
+
+      const order = [];
+      for (let i = 0; i < n; i++) order.push(i);
+      const moved = order.splice(from, 1)[0];
+      order.splice(to, 0, moved);
+      commit(order);
+    });
+
+    el.addEventListener('pointercancel', () => {
+      const s = pressState;
+      if (!s || s.el !== el) return;
+      clearTimeout(s.timer);
+      if (s.active){
+        el.classList.remove('dragging');
+        el.style.transform = '';
+        s.rects.forEach(r => { r.el.style.transform = ''; });
+        lockScroll(false);
+      }
+      pressState = null;
+    });
+  });
+}
+
+/* 按新顺序重排某一天的打卡条目 */
+function reorderLogItems(dateStr, order){
+  const log = logs[dateStr];
+  if (!log || !Array.isArray(log.items)) return;
+  const old = log.items.slice();
+  if (!Array.isArray(order) || order.length !== old.length) return;
+
+  /* 必须正好是 0..n-1 的一个排列。
+     只查长度不够——[0,0,0] 长度也对，但会把同一个动作复制三份。 */
+  const seen = {};
+  for (const i of order){
+    if (!Number.isInteger(i) || i < 0 || i >= old.length || seen[i]) return;
+    seen[i] = 1;
+  }
+
+  log.items = order.map(i => old[i]);
+  save(K_LOGS, logs);
+  bump('save');
+  render();
+}
+
 /* ---------- 事件 ---------- */
 function bind(){
   document.querySelectorAll('.seg button').forEach(b => {
@@ -1063,8 +1266,10 @@ function bind(){
   /* 打勾 */
   document.querySelectorAll('[data-toggle]').forEach(el => {
     el.onclick = () => {
+      if (dragSuppressClick) return;          /* 刚拖过，别顺带打勾 */
       const log = logs[checkinDate]; if (!log) return;
       const it = log.items[Number(el.dataset.toggle)];
+      if (!it) return;
       it.done = !it.done;
       save(K_LOGS, logs);
       if (it.done){
@@ -1114,6 +1319,45 @@ function bind(){
   /* 补记这一天 */
   const cr = document.querySelector('[data-create]');
   if (cr) cr.onclick = () => { createLog(checkinDate); bump('save'); toast('已生成记录'); render(); };
+
+  /* 临时动作：只加到这一天 */
+  const tmpBtn = document.querySelector('[data-tmpadd]');
+  if (tmpBtn) tmpBtn.onclick = () => {
+    const n  = $('#tmpName').value.trim();
+    const tg = $('#tmpTgt').value.trim();
+    if (!n){ toast('先写个动作名'); try{ $('#tmpName').focus(); }catch(e){} return; }
+    if (!logs[checkinDate]) createLog(checkinDate);
+    const log = logs[checkinDate];
+    if (!log){ toast('这一天还不能添加'); return; }
+    log.items = log.items || [];
+    log.items.push({ name:n, target:tg || '', note:'', done:false, weight:'', temp:true });
+    log.rest = false;
+    save(K_LOGS, logs);
+    bump('add');
+    toast('已加上：' + n + '（只影响这一天）');
+    render();
+  };
+
+  /* 从这一天移除某个动作 */
+  document.querySelectorAll('[data-exdel]').forEach(b => {
+    b.onclick = e => {
+      e.stopPropagation();
+      const log = logs[checkinDate]; if (!log || !log.items) return;
+      const i = Number(b.dataset.exdel);
+      const it = log.items[i]; if (!it) return;
+      if (!confirm('从' + prettyDate(checkinDate) + '移除「' + it.name + '」？\n\n'
+          + '只影响这一天，周计划不会被改动。')) return;
+      log.items.splice(i, 1);
+      if (!log.items.length) log.rest = true;   /* 全删光就当作休息日 */
+      save(K_LOGS, logs);
+      bump('uncheck');
+      toast('已移除');
+      render();
+    };
+  });
+
+  /* 打卡页：拖动排序 */
+  bindPressDrag('[data-ex]', order => reorderLogItems(checkinDate, order));
 
   /* 重新生成 */
   const rg = document.querySelector('[data-regen]');
